@@ -20,7 +20,7 @@ all_station_data = Feather.read("all_stations.feather")
 
 # Get year from date
 all_station_data[:year] = map(d -> year(d), all_station_data[:date])
-all_station_data = @where(all_station_data, !ismissing.(:year))
+all_station_data = @where(all_station_data, .!ismissing.(:year))
 all_station_data[:elevation_] = all_station_data[:altitude_m]
 
 # Convert subdataframe to dataframe
@@ -34,7 +34,7 @@ aea = Projection("+proj=aea +ellps=WGS84 +lat_1=51.29427447728234 +lat_2=58.0285
 longlat_wgs84 = Projection("+proj=longlat +datum=WGS84 +no_defs")
 # osgb36 = Projection("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.999601 +x_0=400000 +y_0=-100000 +ellps=airy +units=m +no_defs +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894 ")
 
-scale_between(array, min_value, max_value) = (array - minimum(array))/(maximum(array) - minimum(array)) * max_value + min_value
+scale_between(array, from_range, to_range) = (array - from_range[1])/(to_range[2] - from_range[1]) * to_range[2] + to_range[1]
 
 # Get elevation data from GeoTiff
 elevation_data, geotransform = ArchGDAL.registerdrivers() do
@@ -60,7 +60,8 @@ function get_elevation(elevation_data, x::Number, y::Number)
     try
         elevation_data[c, r]
     catch
-        println((x, y))
+        println("Out of bounds: ", (x, y))
+        return 0.0
     end
 end
 
@@ -74,7 +75,7 @@ group_index_signal = Signal(1)
 
 # This function does all the interpolation between stations for a particular year
 function interpolate_stations(all_station_data, group_index)
-    station_data = @by(@where(all_station_data, :year .== 1941), :station, rain_mm = mean(:rain_mm), lat = first(:lat), long=first(:long), elevation_ = first(:elevation_), tmean_C = mean(:tmean_C))
+    station_data = @by(@where(all_station_data, :year .== 1941), :station, lat = first(:lat), long=first(:long), tmean_C = mean(:tmean_C))
 
     coords = Proj4.transform(longlat_wgs84, aea, convert(Array, station_data[[:long, :lat]]))
 
@@ -83,19 +84,24 @@ function interpolate_stations(all_station_data, group_index)
 
     station_data[:elevation] = map(d -> get_elevation(elevation_data, d[1], d[2]), zip(station_data[:x], station_data[:y]))
 
+    station_data = @where(station_data, :elevation .> 0, .!ismissing.(:tmean_C))
+
+    # station_data[:x] = column_index.(station_data[:x])./10
+    # station_data[:y] = row_index.(station_data[:y])./10
     # return station_data
-    station_data[:x] = scale_between(coords[:, 1], 1, size(elevation_data)[1]/10)
-    station_data[:y] = scale_between(coords[:, 2], 1, size(elevation_data)[2]/10)
 
     # Convert station data to a geo data frame
-    geodata = GeoDataFrame(dropmissing(station_data), [:x, :y])
+    geodata = GeoDataFrame(station_data, [:x, :y])
+
 
     # Domain for kriging interpolation
-    domain = RegularGrid{Float64}(div.(size(elevation_data), 10))
-    # domain = RegularGrid(collect(div.(size(elevation_data), 10)), [x_min, y_max + size(elevation_data)[2]*y_res], 10*[x_res,-y_res])
+    # domain = RegularGrid{Float64}(div.(size(elevation_data), 10))
+    domain = RegularGrid(collect(div.(size(elevation_data), 10)), [x_min, y_max + size(elevation_data)[2]*y_res], 10*[x_res,-y_res])
+
+    # return geodata, domain
 
     problem = EstimationProblem(geodata, domain, :tmean_C)
-    solver = Kriging(:tmean_C => @NT(variogram=GaussianVariogram(range=350.), drifts=[x -> get_elevation(elevation_data, x[1]*10, x[2]*10)]))
+    solver = Kriging(:tmean_C => @NT(variogram=GaussianVariogram(range=1e5), drifts=[x -> 1 + x[1]]))#get_elevation(elevation_data, x[1], x[2])]))
     solution = solve(problem, solver)
     digest(solution)
 
