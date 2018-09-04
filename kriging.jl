@@ -1,6 +1,4 @@
 using GeoStats
-# using PyPlot, PyCall
-# @pyimport mpl_toolkits.basemap as basemap
 using Proj4
 using DataFrames
 using DataFramesMeta
@@ -60,7 +58,7 @@ function get_elevation(elevation_data, x::Number, y::Number)
     try
         elevation_data[c, r]
     catch
-        println("Out of bounds: ", (x, y))
+        # println("Out of bounds: ", (x, y))
         return 0.0
     end
 end
@@ -71,11 +69,11 @@ end
 
 
 # This is a reactive signal
-group_index_signal = Signal(1)
+year_signal = Signal(1941)
 
-# This function does all the interpolation between stations for a particular year
-function interpolate_stations(all_station_data, group_index)
-    station_data = @by(@where(all_station_data, :year .== 1941), :station, lat = first(:lat), long=first(:long), tmean_C = mean(:tmean_C))
+# This station subsets the initial dataframe and gets data for a single year, and also reprojects it into the Albers projection
+function get_station_data_for_year(all_station_data :: DataFrames.DataFrame, input_year :: Int)
+    station_data = @by(@where(all_station_data, :year .== input_year), :station, lat = first(:lat), long=first(:long), tmean_C = mean(:tmean_C))
 
     coords = Proj4.transform(longlat_wgs84, aea, convert(Array, station_data[[:long, :lat]]))
 
@@ -84,12 +82,15 @@ function interpolate_stations(all_station_data, group_index)
 
     station_data[:elevation] = map(d -> get_elevation(elevation_data, d[1], d[2]), zip(station_data[:x], station_data[:y]))
 
+    # Remove stations that are outside the elevation data domain
     station_data = @where(station_data, :elevation .> 0, .!ismissing.(:tmean_C))
 
-    # station_data[:x] = column_index.(station_data[:x])./10
-    # station_data[:y] = row_index.(station_data[:y])./10
-    # return station_data
+    return station_data
+end
 
+# This function does all the interpolation between stations for a particular year
+function interpolate_stations(all_station_data :: DataFrames.DataFrame, input_year :: Int)
+    station_data = get_station_data_for_year(all_station_data, input_year)
     # Convert station data to a geo data frame
     geodata = GeoDataFrame(station_data, [:x, :y])
 
@@ -101,27 +102,28 @@ function interpolate_stations(all_station_data, group_index)
     # return geodata, domain
 
     problem = EstimationProblem(geodata, domain, :tmean_C)
-    solver = Kriging(:tmean_C => @NT(variogram=GaussianVariogram(range=1e5), drifts=[x -> 1 + x[1]]))#get_elevation(elevation_data, x[1], x[2])]))
+    solver = Kriging(:tmean_C => @NT(variogram=γtheo, drifts=[x -> 1, x -> get_elevation(elevation_data, x[1], x[2])]))
+
     solution = solve(problem, solver)
     digest(solution)
 
-    display(Plots.plot(solution))
+    Plots.plot(solution, c=:inferno, clim=(5,15))
+    return Plots.scatter!(
+        column_index.(station_data[:x])./10,
+        domain.dims[2] - row_index.(station_data[:y])./10,
+        series_annotations = text.(station_data[:station], font(8)),
+        legend=false)
     # display(Plots.scatter!(station_data[:x], station_data[:y]))
-    solution
+    #return solution, station_data
 end
 
 # This transforms a reactive signal into a resulting graph
-map(value -> interpolate_stations(all_station_data, value), group_index_signal)
+# map(value -> interpolate_stations(all_station_data, value), year_signal)
 
-# for i in 1:200
-#        push!(number, i)
+# for i in 1941:10:2011
+#        push!(year_signal, i)
 #        sleep(2)
 # end
-
-coords = interpolate_stations(all_station_data, 1)
-coords[:row] = row_index.(coords[:, :y])
-coords[:col] = column_index.(coords[:, :x])
-# Plots.heatmap(rotl90(elevation_data), aspect_ratio=1)
-Plots.heatmap(max(rotl90(imresize(elevation_data, div.(size(elevation_data), 2))), 0), aspect_ratio=1)
-# Plots.scatter!(coords[:col], size(elevation_data)[2] - coords[:row])
-Plots.scatter!(coords[:col]./2, (size(elevation_data)[2] - coords[:row])./2)
+#
+# Plots.heatmap(max(rotl90(imresize(elevation_data, div.(size(elevation_data), 2))), 0), aspect_ratio=1)
+# Plots.scatter!(coords[:col]./2, (size(elevation_data)[2] - coords[:row])./2)
